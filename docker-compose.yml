@@ -64,7 +64,7 @@ services:
       - ${DATA_DIR:-./data}/cubefs/master/data:/cfs/data
       - ${DATA_DIR:-./data}/cubefs/master/log:/cfs/log
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:17020/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:17020/debug/pprof/of/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -90,7 +90,7 @@ services:
       - ${DATA_DIR:-./data}/cubefs/metanode/data:/cfs/data
       - ${DATA_DIR:-./data}/cubefs/metanode/log:/cfs/log
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:17220/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:17220/debug/pprof/of/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -116,7 +116,7 @@ services:
       - ${DATA_DIR:-./data}/cubefs/datanode/disk:/cfs/disk
       - ${DATA_DIR:-./data}/cubefs/datanode/log:/cfs/log
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:17320/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:17320/debug/pprof/of/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
