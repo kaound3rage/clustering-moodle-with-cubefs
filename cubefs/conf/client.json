@@ -1,0 +1,12 @@
+{
+  "masterAddr": "cfs-master:17010",
+  "mountPoint": "/cubefs",
+  "volName": "moodle",
+  "owner": "moodle",
+  "logDir": "/cfs/log",
+  "logLevel": "warn",
+  "profPort": "17410",
+  "authenticate": false,
+  "enableHTTPS": "false",
+  "enableAudit": false
+}

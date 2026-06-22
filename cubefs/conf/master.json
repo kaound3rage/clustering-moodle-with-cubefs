@@ -1,0 +1,18 @@
+{
+  "clusterName": "moodle-cluster",
+  "id": "1",
+  "role": "master",
+  "ip": "cfs-master",
+  "listen": "17010",
+  "prof": "17020",
+  "peers": "1:cfs-master:17010",
+  "retainLogs": "20000",
+  "exporterPort": 9500,
+  "logLevel": "warn",
+  "logDir": "/cfs/log",
+  "walDir": "/cfs/data/wal",
+  "storeDir": "/cfs/data/store",
+  "metaNodeReservedMem": "67108864",
+  "enableFollowerCache": true,
+  "defaultStorageClass": 1
+}

@@ -1,0 +1,18 @@
+{
+  "role": "datanode",
+  "listen": "17310",
+  "prof": "17320",
+  "raftHeartbeat": "17330",
+  "raftReplica": "17340",
+  "raftDir": "/cfs/log",
+  "exporterPort": 9500,
+  "logDir": "/cfs/log",
+  "logLevel": "warn",
+  "disks": [
+    "/cfs/disk:5368709120"
+  ],
+  "masterAddr": [
+    "cfs-master:17010"
+  ],
+  "enableSmuxConnPool": true
+}

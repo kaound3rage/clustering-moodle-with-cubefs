@@ -1,0 +1,263 @@
+# ============================================================================
+#  Moodle Cluster + CubeFS Shared Storage
+#  Architecture:
+#    - CubeFS cluster (master + metanode + datanode) as distributed storage
+#    - CubeFS FUSE client mounts the volume, shared with all Moodle instances
+#    - 3 Moodle replicas behind Nginx load balancer
+#    - Shared PostgreSQL + Redis backend
+# ============================================================================
+
+services:
+
+  # ─── Database ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: moodle
+      POSTGRES_USER: moodle
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moodle"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ─── Cache / Session Store ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  CubeFS Distributed Storage Cluster
+  # ════════════════════════════════════════════════════════════════════════
+
+  # ─── CubeFS Master (metadata & cluster management) ─────────────────────
+  cfs-master:
+    image: openeuler/cubefs:latest
+    restart: unless-stopped
+    command: >
+      bash -c "
+        mkdir -p /cfs/log /cfs/data/wal /cfs/data/store &&
+        /cfs/bin/cfs-server -f -c /cfs/conf/master.json
+      "
+    privileged: true
+    volumes:
+      - ./cubefs/conf/master.json:/cfs/conf/master.json:ro
+      - ${DATA_DIR:-./data}/cubefs/master/data:/cfs/data
+      - ${DATA_DIR:-./data}/cubefs/master/log:/cfs/log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:17020/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - cfsnet
+
+  # ─── CubeFS MetaNode (inode metadata management) ──────────────────────
+  cfs-metanode:
+    image: openeuler/cubefs:latest
+    restart: unless-stopped
+    command: >
+      bash -c "
+        mkdir -p /cfs/log /cfs/data/meta /cfs/data/raft &&
+        /cfs/bin/cfs-server -f -c /cfs/conf/metanode.json
+      "
+    privileged: true
+    depends_on:
+      cfs-master:
+        condition: service_healthy
+    volumes:
+      - ./cubefs/conf/metanode.json:/cfs/conf/metanode.json:ro
+      - ${DATA_DIR:-./data}/cubefs/metanode/data:/cfs/data
+      - ${DATA_DIR:-./data}/cubefs/metanode/log:/cfs/log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:17220/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - cfsnet
+
+  # ─── CubeFS DataNode (actual data storage) ─────────────────────────────
+  cfs-datanode:
+    image: openeuler/cubefs:latest
+    restart: unless-stopped
+    command: >
+      bash -c "
+        mkdir -p /cfs/log /cfs/disk &&
+        /cfs/bin/cfs-server -f -c /cfs/conf/datanode.json
+      "
+    privileged: true
+    depends_on:
+      cfs-master:
+        condition: service_healthy
+    volumes:
+      - ./cubefs/conf/datanode.json:/cfs/conf/datanode.json:ro
+      - ${DATA_DIR:-./data}/cubefs/datanode/disk:/cfs/disk
+      - ${DATA_DIR:-./data}/cubefs/datanode/log:/cfs/log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:17320/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - cfsnet
+
+  # ─── CubeFS Client (FUSE mount – bridges CubeFS ↔ Moodle containers) ──
+  cfs-client:
+    image: openeuler/cubefs:latest
+    restart: unless-stopped
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse:rwm
+    depends_on:
+      cfs-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./cubefs/conf/client.json:/cfs/conf/client.json:ro
+      - ${DATA_DIR:-./data}/cubefs/client/log:/cfs/log
+      - type: bind
+        source: ${MOUNT_POINT:-/data/cubefs-mount}
+        target: /cubefs
+        bind:
+          propagation: shared
+    command: >
+      bash -c "
+        mkdir -p /cfs/log /cubefs &&
+        echo 'Starting CubeFS FUSE client...' &&
+        /cfs/bin/cfs-client -c /cfs/conf/client.json &&
+        echo 'CubeFS mounted at /cubefs' &&
+        while mountpoint -q /cubefs; do sleep 10; done &&
+        echo 'CubeFS mount lost, restarting...'
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "mountpoint -q /cubefs || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cfsnet
+
+  # ─── CubeFS Volume Initializer (runs once, then exits) ─────────────────
+  cfs-init:
+    image: openeuler/cubefs:latest
+    depends_on:
+      cfs-master:
+        condition: service_healthy
+      cfs-metanode:
+        condition: service_healthy
+      cfs-datanode:
+        condition: service_healthy
+    environment:
+      CFS_MASTER: cfs-master:17010
+      CFS_VOL_NAME: ${CUBEFS_VOL_NAME:-moodle}
+      CFS_VOL_OWNER: ${CUBEFS_VOL_NAME:-moodle}
+      CFS_VOL_CAPACITY: ${CUBEFS_VOL_CAPACITY:-30}
+    volumes:
+      - ./cubefs/init/create_volume.sh:/cfs/init/create_volume.sh:ro
+    command: bash /cfs/init/create_volume.sh
+    networks:
+      - cfsnet
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  Moodle Application Cluster
+  # ════════════════════════════════════════════════════════════════════════
+
+  # ─── Moodle Instances (3 replicas sharing CubeFS storage) ──────────────
+  moodle:
+    image: erseco/alpine-moodle
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      cfs-client:
+        condition: service_healthy
+    scale: ${MOODLE_REPLICAS:-3}
+    environment:
+      DB_HOST: postgres
+      DB_NAME: moodle
+      DB_USER: moodle
+      DB_PASS: ${DB_PASSWORD}
+      REDIS_HOST: redis
+      MOODLE_USERNAME: admin
+      MOODLE_PASSWORD: ${MOODLE_ADMIN_PASSWORD}
+      MOODLE_EMAIL: ${MOODLE_EMAIL}
+      MOODLE_SITENAME: ${MOODLE_SITENAME}
+      SITE_URL: ${SITE_URL}
+      SSLPROXY: "true"
+    volumes:
+      - type: bind
+        source: ${MOUNT_POINT:-/data/cubefs-mount}
+        target: /var/www/moodledata
+        bind:
+          propagation: rslave
+        read_only: false
+      - type: bind
+        source: ${MOUNT_POINT:-/data/cubefs-mount}
+        target: /var/www/html
+        bind:
+          propagation: rslave
+        read_only: false
+    networks:
+      - backend
+      - frontend
+
+  # ─── Nginx Load Balancer ────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - moodle
+    ports:
+      - "${PORT:-8082}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - frontend
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Networks
+# ══════════════════════════════════════════════════════════════════════════
+networks:
+  cfsnet:
+    name: cubefs-network
+  backend:
+    name: backend-network
+  frontend:
+    name: frontend-network
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Persistent Volumes
+# ══════════════════════════════════════════════════════════════════════════
+volumes:
+  pgdata:
+  redisdata:
+
+
+
